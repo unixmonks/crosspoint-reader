@@ -54,9 +54,16 @@ struct SyncConfig {
   std::string url;  // e.g. https://taskwarriorsync.com
   Uuid clientId;
   std::string secret;
+  // Taskwarrior contexts (context.NAME.read=FILTER), in file order.
+  struct Context {
+    std::string name;
+    std::string filter;
+  };
+  std::vector<Context> contexts;
 
   // Parses taskrc-style lines (sync.server.url=..., sync.server.client_id=...,
-  // sync.encryption_secret=...). Returns false when a value is missing.
+  // sync.encryption_secret=...) and context.NAME.read=FILTER lines. Returns
+  // false when a sync value is missing; contexts are filled either way.
   static bool parse(const std::string& text, SyncConfig& out);
 };
 

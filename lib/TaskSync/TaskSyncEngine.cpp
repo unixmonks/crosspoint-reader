@@ -168,6 +168,20 @@ bool SyncConfig::parse(const std::string& text, SyncConfig& out) {
       clientId = value;
     } else if (name == "sync.encryption_secret") {
       out.secret = value;
+    } else if (name.compare(0, 8, "context.") == 0) {
+      // context.NAME.read=FILTER (Taskwarrior 2.6+) or context.NAME=FILTER (older).
+      std::string ctx = name.substr(8);
+      const size_t dot = ctx.rfind('.');
+      if (dot != std::string::npos) {
+        if (ctx.compare(dot + 1, std::string::npos, "read") != 0) continue;
+        ctx.erase(dot);
+      }
+      if (ctx.empty() || ctx.find('.') != std::string::npos) continue;
+      // Keep quotes: they belong to the filter (project:'My Project').
+      std::string filter = line.substr(eq + 1);
+      const size_t a = filter.find_first_not_of(" \t\r");
+      const size_t b = filter.find_last_not_of(" \t\r");
+      out.contexts.push_back({ctx, a == std::string::npos ? "" : filter.substr(a, b - a + 1)});
     }
   }
   return !out.url.empty() && Uuid::parse(clientId, out.clientId) && !out.secret.empty();
