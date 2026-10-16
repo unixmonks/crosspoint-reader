@@ -11,8 +11,9 @@
 #include "tasks/TaskwarriorPlatform.h"
 
 // Taskwarrior task list synced with a TaskChampion server (taskwarriorsync.com).
-// Row 0 syncs, then the tasks of the current view, then a row that switches
-// between the Next and Waiting views. Selecting a task offers Done / Start /
+// Row 0 syncs, row 1 picks a Taskwarrior context (when the config defines
+// any), then the tasks of the current view, then a row that switches between
+// the Next and Waiting views. Selecting a task offers Done / Start /
 // Wait / Delete; edits are kept on the SD card until the next sync.
 class TasksActivity final : public UiListActivity {
  public:
@@ -34,6 +35,9 @@ class TasksActivity final : public UiListActivity {
   void drawFooter() override;
 
   void rebuildRows();
+  void loadContexts();
+  void selectContext(int index);
+  int firstTaskRow() const { return contexts.empty() ? 1 : 2; }
   void startSync();
   void runSync();
   void showTaskMenu(int taskIndex);
@@ -53,6 +57,11 @@ class TasksActivity final : public UiListActivity {
   std::vector<freeink::ui::ListItem> rowItems;
   std::string syncRowSubtitle;
   std::string toggleRowLabel;
+  std::string contextRowLabel;
+  std::string contextRowSubtitle;
+  std::vector<tw::SyncConfig::Context> contexts;
+  int contextIndex = -1;  // -1: all tasks
+  tw::TaskFilter contextFilter;
   std::string lastError;
   int waitingCount = 0;
 

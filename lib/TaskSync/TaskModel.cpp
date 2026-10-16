@@ -291,6 +291,94 @@ bool Task::deserialize(const std::string& line, Task& out) {
   return true;
 }
 
+// --- TaskFilter -------------------------------------------------------------
+
+namespace {
+
+bool projectMatches(const std::string& project, const std::string& want) {
+  if (project.compare(0, want.size(), want) != 0) return false;
+  return project.size() == want.size() || project[want.size()] == '.';
+}
+
+std::string unquote(std::string s) {
+  if (s.size() >= 2 && (s.front() == '\'' || s.front() == '"') && s.back() == s.front()) s = s.substr(1, s.size() - 2);
+  return s;
+}
+
+}  // namespace
+
+TaskFilter TaskFilter::parse(const std::string& text) {
+  TaskFilter f;
+  size_t pos = 0;
+  while (pos < text.size()) {
+    while (pos < text.size() && text[pos] == ' ') ++pos;
+    if (pos >= text.size()) break;
+    size_t end = pos;
+    // Quoted values may contain spaces: project:'My Project'
+    char quote = 0;
+    while (end < text.size() && (quote || text[end] != ' ')) {
+      const char c = text[end];
+      if (!quote && (c == '\'' || c == '"')) {
+        quote = c;
+      } else if (c == quote) {
+        quote = 0;
+      }
+      ++end;
+    }
+    std::string term = text.substr(pos, end - pos);
+    pos = end;
+    if (term == "and") continue;
+    if (term == "or" || term == "xor" || term.find('(') != std::string::npos || term.find(')') != std::string::npos) {
+      f.ok = false;
+      continue;
+    }
+    const size_t colon = term.find(':');
+    if (term.size() > 1 && term[0] == '+') {
+      f.terms.push_back({Kind::Tag, term.substr(1)});
+    } else if (term.size() > 1 && term[0] == '-' && colon == std::string::npos) {
+      f.terms.push_back({Kind::NotTag, term.substr(1)});
+    } else if (colon != std::string::npos) {
+      const std::string name = term.substr(0, colon);
+      const std::string value = unquote(term.substr(colon + 1));
+      if (name == "project" || name == "pro" || name == "proj") {
+        f.terms.push_back({Kind::Project, value});
+      } else if (name == "project.not" || name == "pro.not" || name == "proj.not") {
+        f.terms.push_back({Kind::NotProject, value});
+      }
+      // Other attributes (status:, due:, ...) are not supported and ignored.
+    } else {
+      f.terms.push_back({Kind::Word, unquote(term)});
+    }
+  }
+  return f;
+}
+
+bool TaskFilter::matches(const Task& task) const {
+  if (!ok) return true;
+  for (const auto& t : terms) {
+    bool hit = false;
+    switch (t.kind) {
+      case Kind::Project:
+        hit = t.value.empty() ? task.project.empty() : projectMatches(task.project, t.value);
+        break;
+      case Kind::NotProject:
+        hit = t.value.empty() ? !task.project.empty() : !projectMatches(task.project, t.value);
+        break;
+      case Kind::Tag:
+        hit = task.hasTag(t.value);
+        break;
+      case Kind::NotTag:
+        hit = !task.hasTag(t.value);
+        break;
+      case Kind::Word:
+        hit = task.description.find(t.value) != std::string::npos;
+        break;
+    }
+    if (!hit) return false;
+  }
+  return true;
+}
+
 // --- Time -------------------------------------------------------------------
 
 bool parseRfc3339(const std::string& s, OpTime& out) {

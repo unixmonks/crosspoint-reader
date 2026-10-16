@@ -23,6 +23,7 @@ namespace fui = freeink::ui;
 namespace {
 
 constexpr int64_t DAY = 86400;
+constexpr char CONTEXT_FILE[] = "context";
 // E-ink refreshes are slow; redraw sync progress at most this often.
 constexpr unsigned long PROGRESS_RENDER_MS = 2500;
 
@@ -59,6 +60,7 @@ void TasksActivity::onEnter() {
   } else if (!engine->load()) {
     lastError = "Could not read saved tasks";
   }
+  loadContexts();
   rebuildRows();
   requestUpdate();
 }
@@ -132,7 +134,7 @@ void TasksActivity::rebuildRows() {
   const int64_t now = nowOrZero();
   if (engine && !syncing) {
     for (const auto& task : engine->store().tasks()) {
-      if (task.status != tw::Status::Pending) continue;
+      if (task.status != tw::Status::Pending || !contextFilter.matches(task)) continue;
       const bool waiting = task.isWaiting(now);
       if (waiting) ++waitingCount;
       if (waiting == (view == View::Waiting)) visible.push_back(&task);
@@ -162,11 +164,25 @@ void TasksActivity::rebuildRows() {
   syncRow.icon = listIconFor(UIIcon::Wifi, 24);
   syncRow.actionValue = 0;
   rowItems.push_back(syncRow);
+  if (!contexts.empty()) {
+    contextRowLabel = std::string(tr(STR_TASKS_CONTEXT)) + ": " +
+                      (contextIndex < 0 ? std::string(tr(STR_TASKS_CONTEXT_ALL)) : contexts[contextIndex].name);
+    fui::ListItem contextRow;
+    contextRow.label = contextRowLabel.c_str();
+    contextRowSubtitle.clear();
+    if (contextIndex >= 0) {
+      contextRowSubtitle = contexts[contextIndex].filter;
+      if (!contextFilter.supported()) contextRowSubtitle += std::string("  ") + tr(STR_TASKS_CONTEXT_UNSUPPORTED);
+    }
+    contextRow.subtitle = contextRowSubtitle.empty() ? nullptr : contextRowSubtitle.c_str();
+    contextRow.actionValue = static_cast<int16_t>(rowItems.size());
+    rowItems.push_back(contextRow);
+  }
   for (size_t i = 0; i < visible.size(); ++i) {
     fui::ListItem row;
     row.label = visible[i]->description.empty() ? "(no description)" : visible[i]->description.c_str();
     row.subtitle = subtitles[i].empty() ? nullptr : subtitles[i].c_str();
-    row.actionValue = static_cast<int16_t>(i + 1);
+    row.actionValue = static_cast<int16_t>(rowItems.size());
     rowItems.push_back(row);
   }
   fui::ListItem toggleRow;
@@ -204,13 +220,15 @@ void TasksActivity::activateIndex(const int index) {
   nav.selected = index;
   if (index == 0) {
     startSync();
+  } else if (index == 1 && !contexts.empty()) {
+    selectContext(contextIndex + 1 < static_cast<int>(contexts.size()) ? contextIndex + 1 : -1);
   } else if (index == listCount() - 1) {
     view = view == View::Next ? View::Waiting : View::Next;
     nav.selected = 0;
     rebuildRows();
     requestUpdate();
   } else {
-    showTaskMenu(index - 1);
+    showTaskMenu(index - firstTaskRow());
   }
 }
 
@@ -268,6 +286,35 @@ void TasksActivity::applyEdit(const int option, const tw::Uuid& uuid, const bool
     }
   }
   lastError = ok ? "" : tr(STR_TASKS_SAVE_FAILED);
+  rebuildRows();
+  requestUpdate();
+}
+
+void TasksActivity::loadContexts() {
+  contexts.clear();
+  tw::SyncConfig config;
+  taskwarrior::loadConfig(config);  // contexts are read even without sync settings
+  contexts = std::move(config.contexts);
+  contextIndex = -1;
+  if (auto f = fs.open(CONTEXT_FILE, tw::Fs::Mode::Read)) {
+    char buf[64];
+    const long n = f->read(reinterpret_cast<uint8_t*>(buf), sizeof(buf));
+    const std::string saved(buf, n > 0 ? static_cast<size_t>(n) : 0);
+    for (size_t i = 0; i < contexts.size(); ++i) {
+      if (contexts[i].name == saved) contextIndex = static_cast<int>(i);
+    }
+  }
+  contextFilter = contextIndex < 0 ? tw::TaskFilter() : tw::TaskFilter::parse(contexts[contextIndex].filter);
+}
+
+void TasksActivity::selectContext(const int index) {
+  contextIndex = index;
+  contextFilter = index < 0 ? tw::TaskFilter() : tw::TaskFilter::parse(contexts[index].filter);
+  if (index < 0) {
+    fs.remove(CONTEXT_FILE);
+  } else if (auto f = fs.open(CONTEXT_FILE, tw::Fs::Mode::Write)) {
+    f->write(contexts[index].name);
+  }
   rebuildRows();
   requestUpdate();
 }
