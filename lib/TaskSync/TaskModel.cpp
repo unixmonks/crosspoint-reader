@@ -379,6 +379,25 @@ bool TaskFilter::matches(const Task& task) const {
   return true;
 }
 
+std::string TaskFilter::shortProject(const std::string& project) const {
+  size_t cut = 0;
+  if (ok) {
+    for (const auto& t : terms) {
+      if (t.kind != Kind::Project || t.value.empty() || !projectMatches(project, t.value)) continue;
+      cut = std::max(cut, project.size() == t.value.size() ? project.size() : t.value.size() + 1);
+    }
+  }
+  return project.substr(cut);
+}
+
+bool TaskFilter::requiresTag(const std::string& tag) const {
+  if (!ok) return false;
+  for (const auto& t : terms) {
+    if (t.kind == Kind::Tag && t.value == tag) return true;
+  }
+  return false;
+}
+
 // --- Time -------------------------------------------------------------------
 
 bool parseRfc3339(const std::string& s, OpTime& out) {

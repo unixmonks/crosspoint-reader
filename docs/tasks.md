@@ -31,8 +31,13 @@ A filter with `or` or parentheses is marked as not supported and shows all tasks
 
 ## Use
 
-- The list shows pending tasks by Taskwarrior's urgency. With contexts, the side buttons move
-  through the list; without them, all direction buttons do.
+- The list shows pending tasks by Taskwarrior's urgency. With contexts or tags, the side buttons
+  move through the list; without them, all direction buttons do. Long descriptions wrap to three
+  lines. Under a context, rows leave out the project prefix and tags the context already requires.
+- A second strip lists the tags used in the current context, most used first. Press the side Up
+  button on the first task to move focus to the tag strip, and again to the context strip; Left
+  and Right then change the focused strip. Down, Select or Back return to the list. Switching
+  context resets the tag to Any; the tag is not remembered.
 - Select a task for **Done**, **Start/Stop**, **Wait 1 Day**, **Wait 1 Week** (or **Stop Waiting**),
   and **Delete**. Edits work offline and need the clock to be set, which happens on any sync.
 - Hold Select for the menu: **Sync Now** (with the last sync time and unsent edits), **Show

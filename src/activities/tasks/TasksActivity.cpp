@@ -123,17 +123,19 @@ std::string TasksActivity::describe(const tw::Task& task, const int64_t now) con
   };
   if (task.start) add("* started");
   if (task.priority) add(std::string("!") + task.priority);
-  add(task.project);
+  // What the context already guarantees isn't repeated on every row.
+  add(contextFilter.shortProject(task.project));
   if (!task.tags.empty()) {
     std::string tags;
     size_t pos = 0;
     while (pos < task.tags.size()) {
       size_t end = task.tags.find(' ', pos);
       if (end == std::string::npos) end = task.tags.size();
-      if (!tags.empty()) tags += ' ';
-      tags += '+';
-      tags.append(task.tags, pos, end - pos);
+      const std::string tag = task.tags.substr(pos, end - pos);
       pos = end + 1;
+      if (contextFilter.requiresTag(tag) || tag == tagFilter) continue;
+      if (!tags.empty()) tags += ' ';
+      tags += '+' + tag;
     }
     add(tags);
   }
@@ -193,13 +195,44 @@ void TasksActivity::rebuildRows() {
   std::vector<const tw::Task*> visible;
   int waiting = 0;
   const int64_t now = nowOrZero();
+  // Tags of the tasks this context and view show, with how many use each.
+  std::vector<std::pair<std::string, int>> tagCounts;
   if (engine) {
     for (const auto& task : engine->store().tasks()) {
       if (task.status != tw::Status::Pending || !contextFilter.matches(task)) continue;
       const bool isWaiting = task.isWaiting(now);
       if (isWaiting) ++waiting;
-      if (isWaiting == (view == View::Waiting)) visible.push_back(&task);
+      if (isWaiting != (view == View::Waiting)) continue;
+      size_t pos = 0;
+      while (pos < task.tags.size()) {
+        size_t end = task.tags.find(' ', pos);
+        if (end == std::string::npos) end = task.tags.size();
+        const std::string tag = task.tags.substr(pos, end - pos);
+        pos = end + 1;
+        if (tag.empty() || contextFilter.requiresTag(tag)) continue;
+        auto it = std::find_if(tagCounts.begin(), tagCounts.end(), [&tag](const auto& tc) { return tc.first == tag; });
+        if (it == tagCounts.end()) {
+          tagCounts.emplace_back(tag, 1);
+        } else {
+          ++it->second;
+        }
+      }
+      visible.push_back(&task);
     }
+  }
+  std::stable_sort(tagCounts.begin(), tagCounts.end(), [](const auto& a, const auto& b) {
+    return a.second != b.second ? a.second > b.second : a.first < b.first;
+  });
+  // A tag no task here uses any more (done, or edited elsewhere) stops filtering.
+  int activeTag = 0;
+  for (size_t i = 0; i < tagCounts.size(); ++i) {
+    if (tagCounts[i].first == tagFilter) activeTag = static_cast<int>(i) + 1;
+  }
+  if (activeTag == 0) tagFilter.clear();
+  if (!tagFilter.empty()) {
+    visible.erase(std::remove_if(visible.begin(), visible.end(),
+                                 [this](const tw::Task* task) { return !task->hasTag(tagFilter); }),
+                  visible.end());
   }
   if (view == View::Next) {
     std::stable_sort(visible.begin(), visible.end(),
@@ -209,9 +242,15 @@ void TasksActivity::rebuildRows() {
                      [](const tw::Task* a, const tw::Task* b) { return a->wait < b->wait; });
   }
 
-  // Rows and items are read by the render task.
+  // Rows, items and strip labels are read by the render task.
   RenderLock lock(*this);
   waitingCount = waiting;
+  tagLabels.clear();
+  tagLabels.reserve(tagCounts.size() + 1);
+  tagLabels.push_back(tr(STR_TASKS_TAG_ANY));
+  for (const auto& tc : tagCounts) tagLabels.push_back("+" + tc.first);
+  tagActive = activeTag;
+  if (focus == Focus::Tags && tagLabels.size() < 2) focus = contexts.empty() ? Focus::List : Focus::Contexts;
   rows.clear();
   rows.reserve(visible.size() ? visible.size() : 1);
   for (const auto* task : visible) {
@@ -242,36 +281,41 @@ int TasksActivity::headerHeight() const {
   return metrics.homeTopPadding - metrics.topPadding;
 }
 
-int TasksActivity::stripHeight() const {
-  return contexts.empty() || menuOpen ? 0 : renderer.getLineHeight(STRIP_FONT) + 8;
-}
+int TasksActivity::stripLineHeight() const { return renderer.getLineHeight(STRIP_FONT) + 8; }
+
+int TasksActivity::contextStripHeight() const { return contexts.empty() || menuOpen ? 0 : stripLineHeight(); }
+
+int TasksActivity::tagStripHeight() const { return tagLabels.size() < 2 || menuOpen ? 0 : stripLineHeight(); }
 
 void TasksActivity::drawChrome() {
   const auto& metrics = UITheme::getInstance().getMetrics();
   const char* title = view == View::Next ? tr(STR_TASKS) : tr(STR_TASKS_WAITING);
   GUI.drawHeader(renderer, Rect{0, metrics.topPadding, renderer.getScreenWidth(), headerHeight()}, title,
                  headerStatus.empty() ? nullptr : headerStatus.c_str());
-  drawContextStrip(metrics.topPadding + headerHeight(), stripHeight());
+  const int y = metrics.topPadding + headerHeight();
+  drawStrip(y, contextStripHeight(), contextLabels, contextIndex + 1, focus == Focus::Contexts);
+  drawStrip(y + contextStripHeight(), tagStripHeight(), tagLabels, tagActive, focus == Focus::Tags);
 }
 
-// One line of context names; the selected one is inverted and the line
-// scrolls so it stays visible. "<" and ">" mark names cut off at either side.
-void TasksActivity::drawContextStrip(const int y, const int height) const {
-  if (height <= 0) return;  // no contexts, or the menu is open
+// One line of names; the active one is inverted and the line scrolls so it
+// stays visible. "<" and ">" mark names cut off at either side. A frame marks
+// the strip Left/Right currently change.
+void TasksActivity::drawStrip(const int y, const int height, const std::vector<std::string>& labels, const int active,
+                              const bool focused) const {
+  if (height <= 0) return;  // hidden, or the menu is open
   const int width = renderer.getScreenWidth();
   const int margin = 6;
   const int arrowWidth = renderer.getTextWidth(STRIP_FONT, "<") + 6;
-  const int count = static_cast<int>(contexts.size()) + 1;  // + All
-  const int active = contextIndex + 1;
-  auto itemWidth = [this](const int i) {
-    return renderer.getTextWidth(STRIP_FONT, contextName(i - 1).c_str()) + 2 * STRIP_PAD;
+  const int count = static_cast<int>(labels.size());
+  auto itemWidth = [this, &labels](const int i) {
+    return renderer.getTextWidth(STRIP_FONT, labels[i].c_str()) + 2 * STRIP_PAD;
   };
   // Scroll right until the active name fits, leaving room for both markers.
   int first = 0;
   for (;;) {
     int extent = first > 0 ? arrowWidth : 0;
     for (int i = first; i <= active; ++i) extent += itemWidth(i);
-    if (extent <= width - 2 * margin - arrowWidth || first == active) break;
+    if (extent <= width - 2 * margin - arrowWidth || first >= active) break;
     ++first;
   }
   const int textY = y + (height - renderer.getLineHeight(STRIP_FONT)) / 2;
@@ -287,25 +331,32 @@ void TasksActivity::drawContextStrip(const int y, const int height) const {
       renderer.drawText(STRIP_FONT, width - margin - arrowWidth + 6, textY, ">");
       break;
     }
-    const std::string name = contextName(i - 1);
     if (i == active) {
-      renderer.fillRect(x, y + 2, w, height - 3, true);
-      renderer.drawText(STRIP_FONT, x + STRIP_PAD, textY, name.c_str(), false);
+      renderer.fillRect(x, y + 3, w, height - 6, true);
+      renderer.drawText(STRIP_FONT, x + STRIP_PAD, textY, labels[i].c_str(), false);
     } else {
-      renderer.drawText(STRIP_FONT, x + STRIP_PAD, textY, name.c_str());
+      renderer.drawText(STRIP_FONT, x + STRIP_PAD, textY, labels[i].c_str());
     }
     x += w;
   }
-  renderer.drawLine(0, y + height - 1, width - 1, y + height - 1);
+  if (focused) {
+    renderer.drawRect(1, y, width - 2, height, 2, true);
+  } else {
+    renderer.drawLine(0, y + height - 1, width - 1, y + height - 1);
+  }
 }
 
 void TasksActivity::drawFooter() {
-  if (contexts.empty() || menuOpen) {
+  const bool hasTags = tagLabels.size() > 1;
+  if ((contexts.empty() && !hasTags) || menuOpen) {
     UiListActivity::drawFooter();
     return;
   }
+  // Left/Right change the focused strip; from the list, the context strip.
+  const bool tags = focus == Focus::Tags || (focus == Focus::List && contexts.empty());
   const auto labels =
-      mappedInput.mapLabels(tr(STR_BACK), tr(STR_SELECT), prevContextHint.c_str(), nextContextHint.c_str());
+      mappedInput.mapLabels(tr(STR_BACK), tr(STR_SELECT), (tags ? prevTagHint : prevContextHint).c_str(),
+                            (tags ? nextTagHint : nextContextHint).c_str());
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
 }
 
@@ -313,14 +364,18 @@ void TasksActivity::buildScreen(UiScreen& screen) {
   const auto& metrics = UITheme::getInstance().getMetrics();
   const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
   screen.setContentMargin(fui::Insets{
-      static_cast<int16_t>(safe.y + metrics.topPadding + headerHeight() + stripHeight()),
+      static_cast<int16_t>(safe.y + metrics.topPadding + headerHeight() + contextStripHeight() + tagStripHeight()),
       static_cast<int16_t>(renderer.getScreenWidth() - (safe.x + safe.width)),
       static_cast<int16_t>(renderer.getScreenHeight() - (safe.y + safe.height)), static_cast<int16_t>(safe.x)});
   fui::ListProps props;
   props.count = static_cast<uint16_t>(listCount());
   props.action = ACTION_ROW;
   props.inputMask = fui::InputTouch;
+  // Long task descriptions wrap instead of being cut off.
+  if (!menuOpen) props.labelText.maxLines = 3;
   syncListViewport(screen, props);
+  // No row is highlighted while a strip has focus.
+  if (!menuOpen && focus != Focus::List) props.selectedIndex = -1;
   const auto& items = menuOpen ? menuItems : rowItems;
   props.items = items.data();
   props.itemsWindowFirst = 0;
@@ -498,8 +553,12 @@ void TasksActivity::loadContexts() {
   contexts = std::move(config.contexts);
   contextIndex = index;
   contextFilter = index < 0 ? tw::TaskFilter() : tw::TaskFilter::parse(contexts[index].filter);
+  contextLabels.clear();
+  for (int i = -1; i < static_cast<int>(contexts.size()); ++i) contextLabels.push_back(contextName(i));
   prevContextHint = std::string("< ") + tr(STR_TASKS_CONTEXT);
   nextContextHint = std::string(tr(STR_TASKS_CONTEXT)) + " >";
+  prevTagHint = std::string("< ") + tr(STR_TASKS_TAG);
+  nextTagHint = std::string(tr(STR_TASKS_TAG)) + " >";
 }
 
 void TasksActivity::selectContext(const int index) {
@@ -507,6 +566,8 @@ void TasksActivity::selectContext(const int index) {
     RenderLock lock(*this);
     contextIndex = index;
     contextFilter = index < 0 ? tw::TaskFilter() : tw::TaskFilter::parse(contexts[index].filter);
+    // The tag may not exist in the new context.
+    tagFilter.clear();
     nav.selected = 0;
     nav.top = 0;
   }
@@ -522,16 +583,68 @@ void TasksActivity::selectContext(const int index) {
 bool TasksActivity::handleCustomInput() {
   if (popup.handleInput(mappedInput, [this] { requestUpdate(); })) return true;
   pollNetwork();
-  if (!contexts.empty() && !menuOpen) {
-    const int last = static_cast<int>(contexts.size()) - 1;
-    if (mappedInput.wasPressed(MappedInputManager::Button::Left)) {
-      selectContext(contextIndex > -1 ? contextIndex - 1 : last);
-      return true;
+  return !menuOpen && handleStripInput();
+}
+
+void TasksActivity::setFocus(const Focus next) {
+  {
+    RenderLock lock(*this);
+    focus = next;
+  }
+  requestUpdate();
+}
+
+void TasksActivity::selectTag(const int index) {
+  {
+    RenderLock lock(*this);
+    tagFilter = index > 0 && index < static_cast<int>(tagLabels.size()) ? tagLabels[index].substr(1) : "";
+    nav.selected = 0;
+    nav.top = 0;
+  }
+  rebuildRows();
+  requestUpdate();
+}
+
+// Focus moves list -> tag strip -> context strip with the side Up button
+// (from the first task) and back with Down; Left/Right change the focused
+// strip, or the context strip while the list has focus.
+bool TasksActivity::handleStripInput() {
+  using Button = MappedInputManager::Button;
+  const bool hasContexts = !contexts.empty();
+  const bool hasTags = tagLabels.size() > 1;
+  if (!hasContexts && !hasTags) return false;
+
+  const int left = mappedInput.wasPressed(Button::Left) ? -1 : mappedInput.wasPressed(Button::Right) ? 1 : 0;
+  if (left != 0) {
+    const bool tags = focus == Focus::Tags || (focus == Focus::List && !hasContexts);
+    if (tags) {
+      const int count = static_cast<int>(tagLabels.size());
+      selectTag((tagActive + left + count) % count);
+    } else {
+      const int count = static_cast<int>(contexts.size()) + 1;  // + All
+      selectContext((contextIndex + 1 + left + count) % count - 1);
     }
-    if (mappedInput.wasPressed(MappedInputManager::Button::Right)) {
-      selectContext(contextIndex < last ? contextIndex + 1 : -1);
-      return true;
+    return true;
+  }
+  if (mappedInput.wasPressed(Button::Up)) {
+    if (focus == Focus::Tags && hasContexts) {
+      setFocus(Focus::Contexts);
+    } else if (focus == Focus::List && nav.selected == 0) {
+      setFocus(hasTags ? Focus::Tags : Focus::Contexts);
+    } else if (focus == Focus::List) {
+      return false;
     }
+    return true;
+  }
+  if (focus == Focus::List) return false;
+  if (mappedInput.wasPressed(Button::Down)) {
+    setFocus(focus == Focus::Contexts && hasTags ? Focus::Tags : Focus::List);
+    return true;
+  }
+  // Select or Back on a strip returns to the list.
+  if (mappedInput.wasReleased(Button::Confirm) || mappedInput.wasReleased(Button::Back)) {
+    setFocus(Focus::List);
+    return true;
   }
   return false;
 }
@@ -546,10 +659,11 @@ bool TasksActivity::handleButtons() {
 }
 
 void TasksActivity::navigateButtons() {
-  if (contexts.empty() || menuOpen) {
+  if (menuOpen || (contexts.empty() && tagLabels.size() < 2)) {
     UiListActivity::navigateButtons();
     return;
   }
+  if (focus != Focus::List) return;
   // Left/Right switch context, so only the side buttons move the selection.
   using Button = MappedInputManager::Button;
   ButtonNavigator::onPress({Button::Down},

@@ -1,4 +1,100 @@
-# CrossPoint Reader
+# CrossPoint Reader + Taskwarrior
+
+> **This is a fork of [CrossPoint Reader](https://github.com/crosspoint-reader/crosspoint-reader)
+> that adds a Taskwarrior task list.** Everything else is stock CrossPoint. We keep this fork up to
+> date with CrossPoint's `develop` branch; the Tasks app lives in its own folders so updates merge
+> cleanly. For anything not about Tasks, see the [upstream project](https://github.com/crosspoint-reader/crosspoint-reader).
+
+**Tasks** shows your [Taskwarrior](https://taskwarrior.org) 3 tasks on the e-reader, synced with
+any TaskChampion sync server such as [taskwarriorsync.com](https://taskwarriorsync.com). It is
+mostly read-only, with the few edits you want away from a computer: mark done, start/stop, wait a
+day or a week, delete. Tasks are decrypted on the device; the server only ever sees ciphertext.
+
+<p>
+  <img src="docs/images/tasks/tasks-list.png" width="220" alt="Task list filtered by the work context">
+  <img src="docs/images/tasks/tasks-tags.png" width="220" alt="Tag strip focused, showing only +urgent tasks">
+  <img src="docs/images/tasks/tasks-actions.png" width="220" alt="Actions for a task: Done, Stop, Wait, Delete">
+  <img src="docs/images/tasks/tasks-menu.png" width="220" alt="Menu with Sync Now, Show Waiting and contexts">
+</p>
+
+<sub>Screens drawn from sample data; fonts on the device differ slightly.</sub>
+
+### Features
+
+- Tasks sorted by Taskwarrior urgency, with started, priority, project, tags and due date.
+- **Contexts** from your `.taskrc` in a strip under the header; the front Left/Right buttons switch
+  context. Rows leave out what the context already says (under `project:work`, `work.infra` shows
+  as `infra`).
+- **Tags** in a second strip: press the side Up button from the first task to move to it.
+- Sync on open and a few seconds after each edit, over your saved Wi-Fi; Wi-Fi turns off after.
+  Edits made offline wait on the SD card.
+- Hold Select for the menu: Sync Now, Show Waiting, and every context with its task count.
+
+Tested on the Xteink X4. It should run on the other boards CrossPoint supports, but they have not
+been tried.
+
+### Install
+
+1. Download `firmware.bin` from this fork's
+   [Releases](https://github.com/unixmonks/crosspoint-reader/releases).
+2. Flash it like any CrossPoint build: open the [web flasher](https://crosspointreader.com/#flash-tools),
+   pick your device, choose **Custom .bin** and upload the file. Or use `esptool`; see
+   [Install firmware](#install-firmware) below. Read the
+   [USB-locked devices](#usb-locked-devices-xteink-unlocker) warning first.
+
+After that, **Settings → Check for updates** installs new releases of this fork (tagged
+`<CrossPoint version>-tasks.<n>`), not upstream CrossPoint, so Tasks stays installed. Builds older
+than `1.6.5-tasks.1` still update from upstream.
+
+### Configure
+
+Create `taskwarrior.conf` at the root of the SD card (or upload it from the File Transfer web
+page). Copy the sync lines from your `~/.taskrc`:
+
+```ini
+sync.server.url=https://taskwarriorsync.com
+sync.server.client_id=<your client id>
+sync.encryption_secret=<your secret>
+```
+
+`.taskrc`'s escaped slashes (`https:\/\/...`) work as they are. To get contexts, copy their
+`read` lines too:
+
+```ini
+context.work.read=project:work
+context.home.read=project:home
+context.personal.read=project.not:work project.not:fun
+```
+
+Filters support `project:X` (subprojects included), `project.not:X`, `+tag`, `-tag`, `and` and
+plain words (description contains). A filter with `or` or parentheses isn't supported yet; that
+context shows all tasks.
+
+Then:
+
+1. Join Wi-Fi once through **File Transfer** or any other network screen, so the device has a
+   saved network.
+2. Open **Tasks** from the home screen. The first sync derives the encryption key, which takes a
+   while once; after that, syncs take a few seconds.
+
+The device keeps its data in `/.crosspoint/tasks/`, including the derived key, so treat the SD card
+like your `.taskrc`. Delete that folder to start over.
+
+### Buttons
+
+| Button | In the list | On a strip |
+|---|---|---|
+| Front Left / Right | previous / next context | previous / next context or tag |
+| Side Up / Down | move through tasks; Up from the first task goes to the strips | move between strips; Down returns to the list |
+| Select | task actions | back to the list |
+| Hold Select | menu | menu |
+| Back | home | back to the list |
+
+More detail, and how the code is laid out, is in [docs/tasks.md](docs/tasks.md).
+
+---
+
+## About CrossPoint Reader (upstream)
 
 [![Fund contributors](https://img.shields.io/badge/%F0%9F%91%91_Fund_contributors-royalty.dev-BB953A?style=for-the-badge&labelColor=1a1a1a)](https://app.royalty.dev/crosspoint-reader/crosspoint-reader)
 
