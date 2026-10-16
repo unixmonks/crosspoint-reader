@@ -10,12 +10,15 @@
 #include <algorithm>
 #include <cstring>
 #include <ctime>
+#include <optional>
 
 #include "MappedInputManager.h"
 #include "SilentRestart.h"
+#include "WifiCredentialStore.h"
 #include "activities/network/WifiSelectionActivity.h"
 #include "components/UITheme.h"
 #include "components/UiAppHelpers.h"
+#include "fontIds.h"
 #include "network/WifiPowerSaveGuard.h"
 
 namespace fui = freeink::ui;
@@ -24,8 +27,17 @@ namespace {
 
 constexpr int64_t DAY = 86400;
 constexpr char CONTEXT_FILE[] = "context";
-// E-ink refreshes are slow; redraw sync progress at most this often.
-constexpr unsigned long PROGRESS_RENDER_MS = 2500;
+// E-ink refreshes are slow; redraw key derivation progress at most this often.
+constexpr unsigned long PROGRESS_RENDER_MS = 5000;
+// Edits made within this time are uploaded together.
+constexpr unsigned long UPLOAD_DELAY_MS = 5000;
+// Same as WifiSelectionActivity's saved-network attempt.
+constexpr unsigned long CONNECT_TIMEOUT_MS = 7000;
+constexpr unsigned long MENU_HOLD_MS = 600;
+// Menu rows: Sync Now, Show Waiting, then All and the contexts.
+constexpr int MENU_FIRST_CONTEXT = 2;
+constexpr int STRIP_FONT = UI_10_FONT_ID;
+constexpr int STRIP_PAD = 8;
 
 std::string formatDate(const int64_t epoch, const int64_t now) {
   if (!epoch) return "";
@@ -38,6 +50,19 @@ std::string formatDate(const int64_t epoch, const int64_t now) {
   const bool thisYear = epoch > now - 180 * DAY && epoch < now + 180 * DAY;
   strftime(buf, sizeof(buf),
            withTime ? (thisYear ? "%b %d %H:%M" : "%b %d %Y %H:%M") : (thisYear ? "%b %d" : "%b %d %Y"), &tmv);
+  return buf;
+}
+
+// Time only for today, otherwise the date too.
+std::string formatSyncTime(const int64_t epoch, const int64_t now) {
+  const time_t t = static_cast<time_t>(epoch);
+  const time_t n = static_cast<time_t>(now);
+  struct tm a, b;
+  localtime_r(&t, &a);
+  localtime_r(&n, &b);
+  char buf[24];
+  const bool today = a.tm_year == b.tm_year && a.tm_yday == b.tm_yday;
+  strftime(buf, sizeof(buf), today ? "%H:%M" : "%b %d %H:%M", &a);
   return buf;
 }
 
@@ -60,25 +85,34 @@ void TasksActivity::onEnter() {
   } else if (!engine->load()) {
     lastError = "Could not read saved tasks";
   }
+  tw::SyncConfig config;
+  configured = taskwarrior::loadConfig(config);
   loadContexts();
   rebuildRows();
+  updateHeaderStatus();
   requestUpdate();
+  if (configured) requestSync(false);
 }
 
 void TasksActivity::onExit() {
   Activity::onExit();
   engine.reset();
   net.reset();
-  if (wifiActivated && WiFi.getMode() != WIFI_MODE_NULL) {
+  if (wifiActivated) {
+    // Reboot to home to undo the heap fragmentation of the Wi-Fi and TLS session.
     WiFi.disconnect(false);
     delay(30);
     silentRestart();
   }
 }
 
-const char* TasksActivity::headerTitle() const { return view == View::Next ? tr(STR_TASKS) : tr(STR_TASKS_WAITING); }
+int TasksActivity::listCount() const { return static_cast<int>(menuOpen ? menuItems.size() : rowItems.size()); }
 
-int TasksActivity::listCount() const { return static_cast<int>(rowItems.size()); }
+fui::ListNav& TasksActivity::activeNav() { return menuOpen ? menuNav : nav; }
+
+std::string TasksActivity::contextName(const int index) const {
+  return index < 0 ? std::string(tr(STR_TASKS_CONTEXT_ALL)) : contexts[index].name;
+}
 
 std::string TasksActivity::describe(const tw::Task& task, const int64_t now) const {
   std::string s;
@@ -108,7 +142,8 @@ std::string TasksActivity::describe(const tw::Task& task, const int64_t now) con
   return s;
 }
 
-std::string TasksActivity::syncSubtitle() const {
+// The long form for the menu: errors in full, last sync, unsent edits.
+std::string TasksActivity::syncSummary() const {
   if (!engine) return lastError;
   std::string s;
   if (!lastError.empty()) {
@@ -122,22 +157,48 @@ std::string TasksActivity::syncSubtitle() const {
     if (!s.empty()) s += "  ";
     s += std::to_string(engine->pendingCount()) + " " + tr(STR_TASKS_CHANGES_TO_UPLOAD);
   }
+  if (contextIndex >= 0 && !contextFilter.supported()) {
+    s += std::string("  ") + contexts[contextIndex].name + " " + tr(STR_TASKS_CONTEXT_UNSUPPORTED);
+  }
   return s;
 }
 
-void TasksActivity::rebuildRows() {
-  // Rows point into the task store, which sync mutates: rebuild under the
-  // render lock, and list no tasks while a sync runs.
+void TasksActivity::updateHeaderStatus() {
+  std::string s;
+  if (netState == NetState::Connecting) {
+    s = tr(STR_TASKS_CONNECTING);
+  } else if (netState == NetState::Syncing) {
+    s = tr(STR_TASKS_SYNCING);
+    if (syncPercent >= 0) s += " " + std::to_string(syncPercent) + "%";
+  } else if (!engine) {
+    s = lastError;
+  } else if (syncFailed) {
+    s = tr(STR_TASKS_SYNC_FAILED);
+  } else if (!lastError.empty()) {
+    s = lastError;
+  } else if (engine->pendingCount()) {
+    s = std::to_string(engine->pendingCount()) + " " + tr(STR_TASKS_CHANGES_TO_UPLOAD);
+  } else if (offline) {
+    s = tr(STR_TASKS_OFFLINE);
+  } else if (engine->hasSynced() && engine->lastSync()) {
+    s = std::string(tr(STR_TASKS_SYNCED)) + " " + formatSyncTime(engine->lastSync(), nowOrZero());
+  } else if (configured) {
+    s = tr(STR_TASKS_NEVER_SYNCED);
+  }
   RenderLock lock(*this);
-  visible.clear();
-  waitingCount = 0;
+  headerStatus = std::move(s);
+}
+
+void TasksActivity::rebuildRows() {
+  std::vector<const tw::Task*> visible;
+  int waiting = 0;
   const int64_t now = nowOrZero();
-  if (engine && !syncing) {
+  if (engine) {
     for (const auto& task : engine->store().tasks()) {
       if (task.status != tw::Status::Pending || !contextFilter.matches(task)) continue;
-      const bool waiting = task.isWaiting(now);
-      if (waiting) ++waitingCount;
-      if (waiting == (view == View::Waiting)) visible.push_back(&task);
+      const bool isWaiting = task.isWaiting(now);
+      if (isWaiting) ++waiting;
+      if (isWaiting == (view == View::Waiting)) visible.push_back(&task);
     }
   }
   if (view == View::Next) {
@@ -148,103 +209,232 @@ void TasksActivity::rebuildRows() {
                      [](const tw::Task* a, const tw::Task* b) { return a->wait < b->wait; });
   }
 
-  subtitles.clear();
-  subtitles.reserve(visible.size());
-  for (const auto* task : visible) subtitles.push_back(describe(*task, now));
-  syncRowSubtitle = syncSubtitle();
-  toggleRowLabel = view == View::Next
-                       ? std::string(tr(STR_TASKS_SHOW_WAITING)) + " (" + std::to_string(waitingCount) + ")"
-                       : std::string(tr(STR_TASKS_SHOW_NEXT));
-
+  // Rows and items are read by the render task.
+  RenderLock lock(*this);
+  waitingCount = waiting;
+  rows.clear();
+  rows.reserve(visible.size() ? visible.size() : 1);
+  for (const auto* task : visible) {
+    rows.push_back(
+        Row{task->uuid, task->description.empty() ? "(no description)" : task->description, describe(*task, now)});
+  }
+  if (rows.empty()) {
+    // Placeholder; selecting it opens the menu (rows[0].uuid stays nil).
+    rows.push_back(Row{tw::Uuid{}, tr(STR_TASKS_EMPTY), tr(STR_TASKS_MENU_HINT)});
+  }
   rowItems.clear();
-  rowItems.reserve(visible.size() + 2);
-  fui::ListItem syncRow;
-  syncRow.label = tr(STR_TASKS_SYNC_NOW);
-  syncRow.subtitle = syncRowSubtitle.empty() ? nullptr : syncRowSubtitle.c_str();
-  syncRow.icon = listIconFor(UIIcon::Wifi, 24);
-  syncRow.actionValue = 0;
-  rowItems.push_back(syncRow);
-  if (!contexts.empty()) {
-    contextRowLabel = std::string(tr(STR_TASKS_CONTEXT)) + ": " +
-                      (contextIndex < 0 ? std::string(tr(STR_TASKS_CONTEXT_ALL)) : contexts[contextIndex].name);
-    fui::ListItem contextRow;
-    contextRow.label = contextRowLabel.c_str();
-    contextRowSubtitle.clear();
-    if (contextIndex >= 0) {
-      contextRowSubtitle = contexts[contextIndex].filter;
-      if (!contextFilter.supported()) contextRowSubtitle += std::string("  ") + tr(STR_TASKS_CONTEXT_UNSUPPORTED);
-    }
-    contextRow.subtitle = contextRowSubtitle.empty() ? nullptr : contextRowSubtitle.c_str();
-    contextRow.actionValue = static_cast<int16_t>(rowItems.size());
-    rowItems.push_back(contextRow);
+  rowItems.reserve(rows.size());
+  for (size_t i = 0; i < rows.size(); ++i) {
+    fui::ListItem item;
+    item.label = rows[i].label.c_str();
+    item.subtitle = rows[i].subtitle.empty() ? nullptr : rows[i].subtitle.c_str();
+    item.actionValue = static_cast<int16_t>(i);
+    rowItems.push_back(item);
   }
-  for (size_t i = 0; i < visible.size(); ++i) {
-    fui::ListItem row;
-    row.label = visible[i]->description.empty() ? "(no description)" : visible[i]->description.c_str();
-    row.subtitle = subtitles[i].empty() ? nullptr : subtitles[i].c_str();
-    row.actionValue = static_cast<int16_t>(rowItems.size());
-    rowItems.push_back(row);
-  }
-  fui::ListItem toggleRow;
-  toggleRow.label = toggleRowLabel.c_str();
-  toggleRow.actionValue = static_cast<int16_t>(rowItems.size());
-  rowItems.push_back(toggleRow);
-
   if (nav.selected >= listCount()) nav.selected = listCount() - 1;
   if (nav.selected < 0) nav.selected = 0;
   nav.follow(listCount());
 }
 
+int TasksActivity::headerHeight() const {
+  // The short band the home screen uses: title and status share one line.
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  return metrics.homeTopPadding - metrics.topPadding;
+}
+
+int TasksActivity::stripHeight() const {
+  return contexts.empty() || menuOpen ? 0 : renderer.getLineHeight(STRIP_FONT) + 8;
+}
+
+void TasksActivity::drawChrome() {
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  const char* title = view == View::Next ? tr(STR_TASKS) : tr(STR_TASKS_WAITING);
+  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, renderer.getScreenWidth(), headerHeight()}, title,
+                 headerStatus.empty() ? nullptr : headerStatus.c_str());
+  drawContextStrip(metrics.topPadding + headerHeight(), stripHeight());
+}
+
+// One line of context names; the selected one is inverted and the line
+// scrolls so it stays visible. "<" and ">" mark names cut off at either side.
+void TasksActivity::drawContextStrip(const int y, const int height) const {
+  if (height <= 0) return;  // no contexts, or the menu is open
+  const int width = renderer.getScreenWidth();
+  const int margin = 6;
+  const int arrowWidth = renderer.getTextWidth(STRIP_FONT, "<") + 6;
+  const int count = static_cast<int>(contexts.size()) + 1;  // + All
+  const int active = contextIndex + 1;
+  auto itemWidth = [this](const int i) {
+    return renderer.getTextWidth(STRIP_FONT, contextName(i - 1).c_str()) + 2 * STRIP_PAD;
+  };
+  // Scroll right until the active name fits, leaving room for both markers.
+  int first = 0;
+  for (;;) {
+    int extent = first > 0 ? arrowWidth : 0;
+    for (int i = first; i <= active; ++i) extent += itemWidth(i);
+    if (extent <= width - 2 * margin - arrowWidth || first == active) break;
+    ++first;
+  }
+  const int textY = y + (height - renderer.getLineHeight(STRIP_FONT)) / 2;
+  int x = margin;
+  if (first > 0) {
+    renderer.drawText(STRIP_FONT, x, textY, "<");
+    x += arrowWidth;
+  }
+  for (int i = first; i < count; ++i) {
+    const int w = itemWidth(i);
+    const bool last = i == count - 1;
+    if (x + w > width - margin - (last ? 0 : arrowWidth)) {
+      renderer.drawText(STRIP_FONT, width - margin - arrowWidth + 6, textY, ">");
+      break;
+    }
+    const std::string name = contextName(i - 1);
+    if (i == active) {
+      renderer.fillRect(x, y + 2, w, height - 3, true);
+      renderer.drawText(STRIP_FONT, x + STRIP_PAD, textY, name.c_str(), false);
+    } else {
+      renderer.drawText(STRIP_FONT, x + STRIP_PAD, textY, name.c_str());
+    }
+    x += w;
+  }
+  renderer.drawLine(0, y + height - 1, width - 1, y + height - 1);
+}
+
+void TasksActivity::drawFooter() {
+  if (contexts.empty() || menuOpen) {
+    UiListActivity::drawFooter();
+    return;
+  }
+  const auto labels =
+      mappedInput.mapLabels(tr(STR_BACK), tr(STR_SELECT), prevContextHint.c_str(), nextContextHint.c_str());
+  GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+}
+
 void TasksActivity::buildScreen(UiScreen& screen) {
   const auto& metrics = UITheme::getInstance().getMetrics();
   const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
-  screen.setContentMargin(fui::Insets{static_cast<int16_t>(safe.y + metrics.topPadding + metrics.headerHeight),
-                                      static_cast<int16_t>(renderer.getScreenWidth() - (safe.x + safe.width)),
-                                      static_cast<int16_t>(renderer.getScreenHeight() - (safe.y + safe.height)),
-                                      static_cast<int16_t>(safe.x)});
-  screen.spacer(static_cast<int16_t>(metrics.verticalSpacing));
+  screen.setContentMargin(fui::Insets{
+      static_cast<int16_t>(safe.y + metrics.topPadding + headerHeight() + stripHeight()),
+      static_cast<int16_t>(renderer.getScreenWidth() - (safe.x + safe.width)),
+      static_cast<int16_t>(renderer.getScreenHeight() - (safe.y + safe.height)), static_cast<int16_t>(safe.x)});
   fui::ListProps props;
   props.count = static_cast<uint16_t>(listCount());
   props.action = ACTION_ROW;
   props.inputMask = fui::InputTouch;
   syncListViewport(screen, props);
-  props.items = rowItems.data();
+  const auto& items = menuOpen ? menuItems : rowItems;
+  props.items = items.data();
   props.itemsWindowFirst = 0;
-  props.itemsWindowCount = static_cast<uint16_t>(rowItems.size());
+  props.itemsWindowCount = static_cast<uint16_t>(items.size());
   screen.list(props);
 }
 
 void TasksActivity::activateIndex(const int index) {
-  if (syncing || popup.isActive() || index < 0 || index >= listCount()) return;
+  if (popup.isActive() || index < 0 || index >= listCount()) return;
   app.clearTapFlash();
+  if (menuOpen) {
+    menuSelect(index);
+    return;
+  }
   nav.selected = index;
-  if (index == 0) {
-    startSync();
-  } else if (index == 1 && !contexts.empty()) {
-    selectContext(contextIndex + 1 < static_cast<int>(contexts.size()) ? contextIndex + 1 : -1);
-  } else if (index == listCount() - 1) {
-    view = view == View::Next ? View::Waiting : View::Next;
-    nav.selected = 0;
-    rebuildRows();
-    requestUpdate();
+  if (rows[index].uuid.isNil()) {
+    showMenu();
   } else {
-    showTaskMenu(index - firstTaskRow());
+    showTaskMenu(index);
   }
 }
 
-void TasksActivity::showTaskMenu(const int taskIndex) {
-  if (taskIndex < 0 || taskIndex >= static_cast<int>(visible.size())) return;
-  const tw::Task& task = *visible[taskIndex];
-  const tw::Uuid uuid = task.uuid;
+// The menu replaces the task list (it can be longer than a popup fits):
+// Sync Now, Show Waiting, then the contexts with their next-task counts.
+void TasksActivity::showMenu() {
+  if (popup.isActive() || menuOpen) return;
+  const int64_t now = nowOrZero();
+  const int n = static_cast<int>(contexts.size());
+  std::vector<int> counts(n + 1, 0);
+  std::vector<tw::TaskFilter> filters;
+  filters.reserve(n);
+  for (const auto& context : contexts) filters.push_back(tw::TaskFilter::parse(context.filter));
+  if (engine) {
+    for (const auto& task : engine->store().tasks()) {
+      if (task.status != tw::Status::Pending || task.isWaiting(now)) continue;
+      ++counts[0];
+      for (int i = 0; i < n; ++i) {
+        if (filters[i].matches(task)) ++counts[i + 1];
+      }
+    }
+  }
+
+  RenderLock lock(*this);
+  menuRows.clear();
+  menuRows.reserve(MENU_FIRST_CONTEXT + n + 1);
+  menuRows.push_back(Row{tw::Uuid{}, tr(STR_TASKS_SYNC_NOW), syncSummary()});
+  menuRows.push_back(Row{tw::Uuid{}, view == View::Next ? tr(STR_TASKS_SHOW_WAITING) : tr(STR_TASKS_SHOW_NEXT),
+                         view == View::Next ? std::to_string(waitingCount) : std::string()});
+  if (n > 0) {
+    for (int i = -1; i < n; ++i) {
+      menuRows.push_back(Row{tw::Uuid{}, contextName(i), std::to_string(counts[i + 1])});
+    }
+  }
+  menuItems.clear();
+  menuItems.reserve(menuRows.size());
+  for (size_t i = 0; i < menuRows.size(); ++i) {
+    fui::ListItem item;
+    item.label = menuRows[i].label.c_str();
+    // Row 0 shows the sync summary underneath; the others show a count on the right.
+    if (i == 0) {
+      item.subtitle = menuRows[i].subtitle.empty() ? nullptr : menuRows[i].subtitle.c_str();
+    } else {
+      item.value = menuRows[i].subtitle.empty() ? nullptr : menuRows[i].subtitle.c_str();
+    }
+    if (static_cast<int>(i) == MENU_FIRST_CONTEXT) item.sectionHeading = tr(STR_TASKS_CONTEXT);
+    item.actionValue = static_cast<int16_t>(i);
+    menuItems.push_back(item);
+  }
+  menuOpen = true;
+  menuNav.reset();
+  menuNav.selected = n > 0 ? MENU_FIRST_CONTEXT + contextIndex + 1 : 0;
+  menuNav.follow(static_cast<int>(menuItems.size()));
+  requestUpdate();
+}
+
+void TasksActivity::closeMenu() {
+  {
+    RenderLock lock(*this);
+    menuOpen = false;
+  }
+  requestUpdate();
+}
+
+void TasksActivity::menuSelect(const int index) {
+  closeMenu();
+  if (index == 0) {
+    requestSync(true);
+  } else if (index == 1) {
+    {
+      RenderLock lock(*this);
+      view = view == View::Next ? View::Waiting : View::Next;
+      nav.selected = 0;
+      nav.top = 0;
+    }
+    rebuildRows();
+    requestUpdate();
+  } else {
+    selectContext(index - MENU_FIRST_CONTEXT - 1);
+  }
+}
+
+void TasksActivity::showTaskMenu(const int row) {
+  tw::Task* task = engine ? engine->store().find(rows[row].uuid) : nullptr;
+  if (!task) return;
+  const tw::Uuid uuid = task->uuid;
   const bool waiting = view == View::Waiting;
   // Order matches applyEdit().
   const char* options[] = {tr(STR_TASKS_DONE),
-                           task.start ? tr(STR_TASKS_STOP) : tr(STR_TASKS_START),
+                           task->start ? tr(STR_TASKS_STOP) : tr(STR_TASKS_START),
                            waiting ? tr(STR_TASKS_UNWAIT) : tr(STR_TASKS_WAIT_DAY),
                            tr(STR_TASKS_WAIT_WEEK),
                            tr(STR_DELETE),
                            tr(STR_CANCEL)};
-  popup.show(tr(STR_TASKS), task.description.c_str(), options, 6, 0,
+  popup.show(tr(STR_TASKS), task->description.c_str(), options, 6, 0,
              [this, uuid, waiting](const int option) { applyEdit(option, uuid, waiting); });
   requestUpdate();
 }
@@ -258,7 +448,7 @@ void TasksActivity::applyEdit(const int option, const tw::Uuid& uuid, const bool
   if (now == 0) {
     // Without a trustworthy clock the edit would lose every conflict.
     lastError = tr(STR_TASKS_CLOCK_UNKNOWN);
-    rebuildRows();
+    updateHeaderStatus();
     requestUpdate();
     return;
   }
@@ -286,30 +476,40 @@ void TasksActivity::applyEdit(const int option, const tw::Uuid& uuid, const bool
     }
   }
   lastError = ok ? "" : tr(STR_TASKS_SAVE_FAILED);
+  if (ok && configured) syncDueAt = millis() + UPLOAD_DELAY_MS;
   rebuildRows();
+  updateHeaderStatus();
   requestUpdate();
 }
 
 void TasksActivity::loadContexts() {
-  contexts.clear();
   tw::SyncConfig config;
   taskwarrior::loadConfig(config);  // contexts are read even without sync settings
-  contexts = std::move(config.contexts);
-  contextIndex = -1;
+  int index = -1;
   if (auto f = fs.open(CONTEXT_FILE, tw::Fs::Mode::Read)) {
     char buf[64];
     const long n = f->read(reinterpret_cast<uint8_t*>(buf), sizeof(buf));
     const std::string saved(buf, n > 0 ? static_cast<size_t>(n) : 0);
-    for (size_t i = 0; i < contexts.size(); ++i) {
-      if (contexts[i].name == saved) contextIndex = static_cast<int>(i);
+    for (size_t i = 0; i < config.contexts.size(); ++i) {
+      if (config.contexts[i].name == saved) index = static_cast<int>(i);
     }
   }
-  contextFilter = contextIndex < 0 ? tw::TaskFilter() : tw::TaskFilter::parse(contexts[contextIndex].filter);
+  RenderLock lock(*this);
+  contexts = std::move(config.contexts);
+  contextIndex = index;
+  contextFilter = index < 0 ? tw::TaskFilter() : tw::TaskFilter::parse(contexts[index].filter);
+  prevContextHint = std::string("< ") + tr(STR_TASKS_CONTEXT);
+  nextContextHint = std::string(tr(STR_TASKS_CONTEXT)) + " >";
 }
 
 void TasksActivity::selectContext(const int index) {
-  contextIndex = index;
-  contextFilter = index < 0 ? tw::TaskFilter() : tw::TaskFilter::parse(contexts[index].filter);
+  {
+    RenderLock lock(*this);
+    contextIndex = index;
+    contextFilter = index < 0 ? tw::TaskFilter() : tw::TaskFilter::parse(contexts[index].filter);
+    nav.selected = 0;
+    nav.top = 0;
+  }
   if (index < 0) {
     fs.remove(CONTEXT_FILE);
   } else if (auto f = fs.open(CONTEXT_FILE, tw::Fs::Mode::Write)) {
@@ -321,59 +521,170 @@ void TasksActivity::selectContext(const int index) {
 
 bool TasksActivity::handleCustomInput() {
   if (popup.handleInput(mappedInput, [this] { requestUpdate(); })) return true;
-  return syncing;
+  pollNetwork();
+  if (!contexts.empty() && !menuOpen) {
+    const int last = static_cast<int>(contexts.size()) - 1;
+    if (mappedInput.wasPressed(MappedInputManager::Button::Left)) {
+      selectContext(contextIndex > -1 ? contextIndex - 1 : last);
+      return true;
+    }
+    if (mappedInput.wasPressed(MappedInputManager::Button::Right)) {
+      selectContext(contextIndex < last ? contextIndex + 1 : -1);
+      return true;
+    }
+  }
+  return false;
 }
 
-void TasksActivity::startSync() {
-  if (!engine) return;
-  tw::SyncConfig config;
-  if (!taskwarrior::loadConfig(config)) {
-    const char* options[] = {tr(STR_OK_BUTTON)};
-    popup.showMessage(tr(STR_TASKS_SETUP_TITLE), tr(STR_TASKS_SETUP_MESSAGE), options, 1, 0,
-                      [this](int) { requestUpdate(); });
-    requestUpdate();
+bool TasksActivity::handleButtons() {
+  if (!menuOpen && mappedInput.wasLongPressed(MappedInputManager::Button::Confirm, MENU_HOLD_MS)) {
+    app.clearTapFlash();
+    showMenu();
+    return true;
+  }
+  return UiListActivity::handleButtons();
+}
+
+void TasksActivity::navigateButtons() {
+  if (contexts.empty() || menuOpen) {
+    UiListActivity::navigateButtons();
     return;
   }
-  wifiActivated = true;
+  // Left/Right switch context, so only the side buttons move the selection.
+  using Button = MappedInputManager::Button;
+  ButtonNavigator::onPress({Button::Down},
+                           [this] { moveSelectionTo(ButtonNavigator::nextIndex(nav.selected, listCount())); });
+  ButtonNavigator::onPress({Button::Up},
+                           [this] { moveSelectionTo(ButtonNavigator::previousIndex(nav.selected, listCount())); });
+  buttonNavigator.onContinuous({Button::Down}, [this] {
+    moveSelectionTo(ButtonNavigator::nextPageIndex(nav.selected, listCount(), nav.inputPageRows()));
+  });
+  buttonNavigator.onContinuous({Button::Up}, [this] {
+    moveSelectionTo(ButtonNavigator::previousPageIndex(nav.selected, listCount(), nav.inputPageRows()));
+  });
+}
+
+void TasksActivity::onBackButton() {
+  if (menuOpen) {
+    closeMenu();
+    return;
+  }
+  // Last try for unsent edits, if Wi-Fi is already up.
+  if (engine && configured && engine->pendingCount() && WiFi.status() == WL_CONNECTED) runSync();
+  finish();
+}
+
+void TasksActivity::requestSync(const bool manual) {
+  if (!engine || netState != NetState::Idle) return;
+  syncDueAt = 0;
+  tw::SyncConfig config;
+  configured = taskwarrior::loadConfig(config);
+  if (!configured) {
+    if (manual) {
+      const char* options[] = {tr(STR_OK_BUTTON)};
+      popup.showMessage(tr(STR_TASKS_SETUP_TITLE), tr(STR_TASKS_SETUP_MESSAGE), options, 1, 0,
+                        [this](int) { requestUpdate(); });
+      requestUpdate();
+    }
+    return;
+  }
   if (WiFi.status() == WL_CONNECTED) {
     runSync();
     return;
   }
-  startActivityForResult(std::make_unique<WifiSelectionActivity>(renderer, mappedInput),
-                         [this](const ActivityResult& result) {
-                           if (!result.isCancelled) runSync();
-                         });
+  if (startConnect()) return;
+  if (manual) {
+    // No saved network: let the user pick one.
+    startActivityForResult(std::make_unique<WifiSelectionActivity>(renderer, mappedInput),
+                           [this](const ActivityResult& result) {
+                             if (!result.isCancelled) runSync();
+                           });
+    return;
+  }
+  offline = true;
+  updateHeaderStatus();
+  requestUpdate();
 }
 
-bool TasksActivity::reportProgress(const char* phase, const int percent) {
-  const bool phaseChanged = phase != lastPhase;
-  lastPhase = phase;
-  if (phaseChanged || millis() - lastProgressRender > PROGRESS_RENDER_MS) {
-    {
-      RenderLock lock(*this);
-      syncStatus = phase;
-      if (percent >= 0) syncStatus += " " + std::to_string(percent) + "%";
-    }
-    requestUpdateAndWait();
-    lastProgressRender = millis();
+// Joins the last network WifiSelectionActivity connected to. Returns false
+// when there is none.
+bool TasksActivity::startConnect() {
+  std::optional<WifiCredential> cred;
+  {
+    RenderLock lock(*this);  // the SD card shares the display's SPI bus
+    WIFI_STORE.loadFromFile();
   }
+  const std::string ssid = WIFI_STORE.getLastConnectedSsid();
+  if (!ssid.empty()) cred = WIFI_STORE.findCredential(ssid);
+  if (!cred) return false;
+  LOG_DBG("TASKS", "Connecting to %s", cred->ssid.c_str());
+  wifiActivated = true;
+  WiFi.persistent(false);
+  WiFi.mode(WIFI_STA);
+  if (cred->password.empty()) {
+    WiFi.begin(cred->ssid.c_str());
+  } else {
+    WiFi.begin(cred->ssid.c_str(), cred->password.c_str());
+  }
+  netState = NetState::Connecting;
+  connectStarted = millis();
+  updateHeaderStatus();
+  requestUpdate();
+  return true;
+}
+
+void TasksActivity::pollNetwork() {
+  if (netState == NetState::Connecting) {
+    const wl_status_t status = WiFi.status();
+    if (status == WL_CONNECTED) {
+      netState = NetState::Idle;
+      runSync();
+    } else if (status == WL_CONNECT_FAILED || status == WL_NO_SSID_AVAIL ||
+               millis() - connectStarted > CONNECT_TIMEOUT_MS) {
+      LOG_INF("TASKS", "Wi-Fi connect failed (%d)", static_cast<int>(status));
+      netState = NetState::Idle;
+      offline = true;
+      wifiOff();
+      updateHeaderStatus();
+      requestUpdate();
+    }
+    return;
+  }
+  if (syncDueAt && static_cast<long>(millis() - syncDueAt) >= 0 && !popup.isActive()) requestSync(false);
+}
+
+void TasksActivity::wifiOff() {
+  WiFi.disconnect(true);
+  WiFi.mode(WIFI_OFF);
+}
+
+bool TasksActivity::reportProgress(const char* /*phase*/, const int percent) {
+  // Only the one-time key derivation is slow enough to need progress.
+  if (percent < 0 || millis() - lastProgressRender < PROGRESS_RENDER_MS) {
+    delay(1);
+    return true;
+  }
+  syncPercent = percent;
+  updateHeaderStatus();
+  requestUpdateAndWait();
+  lastProgressRender = millis();
   // Long CPU work (key derivation) runs on the loop task; let idle tasks in.
   delay(1);
   return true;
 }
 
+// Runs on the loop task: input waits until the sync is done. The list stays
+// drawn from the rows' own copies of the task text.
 void TasksActivity::runSync() {
   tw::SyncConfig config;
   if (!engine || !taskwarrior::loadConfig(config)) return;
+  syncDueAt = 0;
+  wifiActivated = true;
   WifiPowerSaveGuard psGuard;
   WiFi.setSleep(false);
-  {
-    RenderLock lock(*this);
-    syncing = true;
-    syncStatus = tr(STR_TASKS_SYNCING);
-  }
-  rebuildRows();
-  lastPhase = nullptr;
+  netState = NetState::Syncing;
+  syncPercent = -1;
+  updateHeaderStatus();
   requestUpdateAndWait();
   lastProgressRender = millis();
 
@@ -388,19 +699,14 @@ void TasksActivity::runSync() {
     // Keep whatever was saved before the failure.
     engine->load();
   }
-  {
-    RenderLock lock(*this);
-    syncing = false;
-    lastError =
-        result == tw::SyncResult::Ok ? "" : std::string(tr(STR_TASKS_SYNC_FAILED)) + ": " + tw::syncResultName(result);
-  }
+  wifiOff();
+  netState = NetState::Idle;
+  offline = false;
+  syncFailed = result != tw::SyncResult::Ok;
+  lastError = syncFailed ? std::string(tr(STR_TASKS_SYNC_FAILED)) + ": " + tw::syncResultName(result) : std::string();
   rebuildRows();
+  updateHeaderStatus();
   requestUpdate();
-}
-
-void TasksActivity::drawFooter() {
-  UiListActivity::drawFooter();
-  if (syncing) GUI.drawPopup(renderer, syncStatus.c_str());
 }
 
 void TasksActivity::render(RenderLock&& lock) {
