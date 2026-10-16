@@ -19,6 +19,9 @@ day or a week, delete. Tasks are decrypted on the device; the server only ever s
 
 <sub>Screens drawn from sample data; fonts on the device differ slightly.</sub>
 
+**Sponsored by** [Talisim](https://talisim.com), [TaskwarriorSync](https://taskwarriorsync.com) and
+[Margin Paper](https://marginpaper.com).
+
 ### Features
 
 - Tasks sorted by Taskwarrior urgency, with started, priority, project, tags and due date.
