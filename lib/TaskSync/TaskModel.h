@@ -63,6 +63,11 @@ class TaskFilter {
   static TaskFilter parse(const std::string& text);
   bool matches(const Task& task) const;
   bool supported() const { return ok; }
+  // The project with the part every match shares removed: under project:work,
+  // "work.boop" becomes "boop" and "work" becomes "". Others are unchanged.
+  std::string shortProject(const std::string& project) const;
+  // True when every match has this tag (+tag), so showing it adds nothing.
+  bool requiresTag(const std::string& tag) const;
 
  private:
   enum class Kind : uint8_t { Project, NotProject, Tag, NotTag, Word };
