@@ -24,21 +24,26 @@ context.work.read=project:work
 context.personal.read=project.not:work project.not:fun
 ```
 
-The **Context** row under Sync Now then cycles through All and each context; the choice is
-remembered. Filters support `project:X` (including subprojects), `project.not:X`, `+tag`, `-tag`,
-`and`, and bare words (description contains). Other attributes such as `due:` are ignored. A
-filter with `or` or parentheses is marked as not supported and shows all tasks.
+Contexts appear in a strip under the header: the front Left/Right buttons switch context and the
+choice is remembered. Filters support `project:X` (including subprojects), `project.not:X`, `+tag`,
+`-tag`, `and`, and bare words (description contains). Other attributes such as `due:` are ignored.
+A filter with `or` or parentheses is marked as not supported and shows all tasks.
 
 ## Use
 
-- **Sync Now** connects to Wi-Fi, pulls changes, uploads your edits, and shows the last sync time
-  and how many edits are waiting to upload. The first sync derives the encryption key
-  (PBKDF2, 600,000 rounds), which takes a while once; the key is then cached on the SD card.
-- The list shows pending tasks by Taskwarrior's urgency. The last row switches to **Waiting** tasks
-  (a `wait` date in the future).
+- The list shows pending tasks by Taskwarrior's urgency. With contexts, the side buttons move
+  through the list; without them, all direction buttons do.
 - Select a task for **Done**, **Start/Stop**, **Wait 1 Day**, **Wait 1 Week** (or **Stop Waiting**),
-  and **Delete**. Edits work offline and are uploaded on the next sync. They need the clock to be
-  set, which happens on any sync.
+  and **Delete**. Edits work offline and need the clock to be set, which happens on any sync.
+- Hold Select for the menu: **Sync Now** (with the last sync time and unsent edits), **Show
+  Waiting** (tasks with a `wait` date in the future), and every context with its task count.
+- Tasks syncs when it opens and 5 seconds after an edit, over the Wi-Fi network you last joined,
+  then turns Wi-Fi off. The header shows the state: Connecting, Syncing, Synced, Offline, or Sync
+  failed (the menu shows the reason). Sync Now opens the Wi-Fi picker when no network is saved.
+  Buttons pause while the sync itself runs. Leaving Tasks after Wi-Fi was used restarts to the
+  home screen to free memory.
+- The first sync derives the encryption key (PBKDF2, 600,000 rounds), which takes a while once; the
+  key is then cached on the SD card.
 
 ## Storage
 
