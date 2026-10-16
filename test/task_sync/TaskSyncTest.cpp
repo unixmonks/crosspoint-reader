@@ -267,6 +267,19 @@ TEST(TaskModel, ContextFilters) {
   EXPECT_TRUE(orFilter.matches(t));
 }
 
+TEST(TaskModel, ContextShortensRows) {
+  const auto work = TaskFilter::parse("project:work +next");
+  EXPECT_EQ(work.shortProject("work.boop"), "boop");
+  EXPECT_EQ(work.shortProject("work"), "");
+  EXPECT_EQ(work.shortProject("workshop"), "workshop");
+  EXPECT_EQ(TaskFilter::parse("project:work project:work.boop").shortProject("work.boop.x"), "x");
+  EXPECT_EQ(TaskFilter::parse("project.not:fun").shortProject("work.boop"), "work.boop");
+  EXPECT_EQ(TaskFilter().shortProject("work.boop"), "work.boop");
+  EXPECT_TRUE(work.requiresTag("next"));
+  EXPECT_FALSE(work.requiresTag("phone"));
+  EXPECT_FALSE(TaskFilter::parse("project:work or +next").requiresTag("next"));
+}
+
 TEST(TaskModel, ContextsFromConfig) {
   SyncConfig c;
   SyncConfig::parse(

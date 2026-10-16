@@ -11,9 +11,11 @@
 #include "tasks/TaskwarriorPlatform.h"
 
 // Taskwarrior task list synced with a TaskChampion server (taskwarriorsync.com).
-// A slim header shows the sync state and a strip under it the Taskwarrior
-// contexts; the front Left/Right buttons switch context and the side buttons
-// move through the tasks. Selecting a task offers Done / Start / Wait /
+// A slim header shows the sync state. Under it, one strip lists the
+// Taskwarrior contexts and another the tags used in the current context. The
+// front Left/Right buttons change the focused strip (the context strip while
+// the list has focus); the side buttons move through the tasks, and Up from
+// the first task moves focus onto the strips. Selecting a task offers Done / Start / Wait /
 // Delete. Holding Select opens a menu to pick a context, show waiting tasks or
 // sync. Sync runs on open and a few seconds after an edit, over the last
 // saved Wi-Fi network.
@@ -29,6 +31,7 @@ class TasksActivity final : public UiListActivity {
  private:
   enum class View : uint8_t { Next, Waiting };
   enum class NetState : uint8_t { Idle, Connecting, Syncing };
+  enum class Focus : uint8_t { List, Tags, Contexts };
 
   // A list row. Rows own their text so the list can be drawn while a sync
   // rewrites the task store.
@@ -50,9 +53,14 @@ class TasksActivity final : public UiListActivity {
   void drawFooter() override;
 
   int headerHeight() const;
-  int stripHeight() const;
-  void drawContextStrip(int y, int height) const;
+  int stripLineHeight() const;
+  int contextStripHeight() const;
+  int tagStripHeight() const;
+  void drawStrip(int y, int height, const std::vector<std::string>& labels, int active, bool focused) const;
   std::string contextName(int index) const;
+  bool handleStripInput();
+  void setFocus(Focus next);
+  void selectTag(int index);
 
   void rebuildRows();
   void updateHeaderStatus();
@@ -86,14 +94,21 @@ class TasksActivity final : public UiListActivity {
   std::vector<tw::SyncConfig::Context> contexts;
   int contextIndex = -1;  // -1: all tasks
   tw::TaskFilter contextFilter;
+  std::string tagFilter;  // empty: any tag
+  Focus focus = Focus::List;
   int waitingCount = 0;
   std::string lastError;
   bool syncFailed = false;
 
   // Drawn by the render task; written under the render lock.
   std::string headerStatus;
+  std::vector<std::string> contextLabels;  // "All", then the context names
+  std::vector<std::string> tagLabels;      // "Any", then "+tag" by use; only "Any" when no tags
+  int tagActive = 0;                       // index into tagLabels
   std::string prevContextHint;
   std::string nextContextHint;
+  std::string prevTagHint;
+  std::string nextTagHint;
 
   // The hold-Select menu, shown in place of the task list.
   bool menuOpen = false;

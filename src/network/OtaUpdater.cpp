@@ -12,6 +12,7 @@
 // clang-format on
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 
@@ -19,7 +20,14 @@
 #include "FirmwareFlasher.h"
 
 namespace {
-constexpr char latestReleaseUrl[] = "https://api.github.com/repos/crosspoint-reader/crosspoint-reader/releases/latest";
+// The Taskwarrior fork updates from its own releases, tagged <version>-tasks.<n>.
+constexpr char latestReleaseUrl[] = "https://api.github.com/repos/unixmonks/crosspoint-reader/releases/latest";
+
+// The <n> of a "-tasks.<n>" suffix, or 0 without one.
+int tasksRelease(const char* version) {
+  const char* suffix = strstr(version, "-tasks.");
+  return suffix ? atoi(suffix + 7) : 0;
+}
 }  // namespace
 
 OtaUpdater::OtaUpdaterError OtaUpdater::checkForUpdate() {
@@ -123,6 +131,11 @@ bool OtaUpdater::isUpdateNewer() const {
    * Check patch versions.
    */
   if (latestPatch != currentPatch) return latestPatch > currentPatch;
+
+  // Same upstream version: a later fork release is newer.
+  if (tasksRelease(latestVersion.c_str()) != tasksRelease(currentVersion)) {
+    return tasksRelease(latestVersion.c_str()) > tasksRelease(currentVersion);
+  }
 
   // If we reach here, it means all segments are equal.
   // One final check, if we're on an RC build (contains "-rc"), we should consider the latest version as newer even if
