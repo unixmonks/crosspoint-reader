@@ -54,6 +54,26 @@ struct Task {
   static bool deserialize(const std::string& line, Task& out);
 };
 
+// The subset of Taskwarrior filter syntax that contexts usually use. Terms
+// are ANDed: project:X (X and its subprojects), project.not:X, +tag, -tag,
+// and bare words (description contains). Other attribute terms are ignored;
+// "or" and parentheses make the filter unsupported, and it then matches all.
+class TaskFilter {
+ public:
+  static TaskFilter parse(const std::string& text);
+  bool matches(const Task& task) const;
+  bool supported() const { return ok; }
+
+ private:
+  enum class Kind : uint8_t { Project, NotProject, Tag, NotTag, Word };
+  struct Term {
+    Kind kind;
+    std::string value;
+  };
+  std::vector<Term> terms;
+  bool ok = true;
+};
+
 // Timestamps in sync operations are RFC 3339 strings with optional fractional seconds.
 struct OpTime {
   int64_t seconds = 0;

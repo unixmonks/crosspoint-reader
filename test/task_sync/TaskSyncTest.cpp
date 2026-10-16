@@ -243,3 +243,38 @@ TEST(TaskModel, SyncConfigFromTaskrc) {
   EXPECT_EQ(c.secret, "two words");
   EXPECT_FALSE(SyncConfig::parse("sync.server.url=x\n", c));
 }
+
+TEST(TaskModel, ContextFilters) {
+  Task t;
+  t.project = "work.boop";
+  t.tags = "next";
+  t.description = "file work.taxes";
+  EXPECT_TRUE(TaskFilter::parse("project:work").matches(t));
+  EXPECT_TRUE(TaskFilter::parse("project:work.boop").matches(t));
+  EXPECT_FALSE(TaskFilter::parse("project:wor").matches(t));
+  EXPECT_FALSE(TaskFilter::parse("project.not:work project.not:fun").matches(t));
+  EXPECT_TRUE(TaskFilter::parse("project.not:fun +next").matches(t));
+  EXPECT_FALSE(TaskFilter::parse("project:work -next").matches(t));
+  EXPECT_TRUE(TaskFilter::parse("work.taxes").matches(t));  // bare word: description search
+  EXPECT_TRUE(TaskFilter::parse("project:work and status:pending").matches(t));
+
+  Task quoted;
+  quoted.project = "My Project";
+  EXPECT_TRUE(TaskFilter::parse("project:'My Project'").matches(quoted));
+
+  const auto orFilter = TaskFilter::parse("project:fun or project:freebsd");
+  EXPECT_FALSE(orFilter.supported());
+  EXPECT_TRUE(orFilter.matches(t));
+}
+
+TEST(TaskModel, ContextsFromConfig) {
+  SyncConfig c;
+  SyncConfig::parse(
+      "context.work.read=project:work\ncontext.work.write=project:work\n"
+      "context.personal.read=project.not:work project.not:fun\ncontext.old=+home\ncontext=work\n",
+      c);
+  ASSERT_EQ(c.contexts.size(), 3u);
+  EXPECT_EQ(c.contexts[0].name, "work");
+  EXPECT_EQ(c.contexts[1].filter, "project.not:work project.not:fun");
+  EXPECT_EQ(c.contexts[2].name, "old");
+}

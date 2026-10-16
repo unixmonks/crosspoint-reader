@@ -17,6 +17,18 @@ sync.encryption_secret=<your secret>
 
 `.taskrc`'s escaped slashes (`https:\/\/...`) are accepted as is.
 
+To filter by [context](https://taskwarrior.org/docs/context/), add your context lines too:
+
+```
+context.work.read=project:work
+context.personal.read=project.not:work project.not:fun
+```
+
+The **Context** row under Sync Now then cycles through All and each context; the choice is
+remembered. Filters support `project:X` (including subprojects), `project.not:X`, `+tag`, `-tag`,
+`and`, and bare words (description contains). Other attributes such as `due:` are ignored. A
+filter with `or` or parentheses is marked as not supported and shows all tasks.
+
 ## Use
 
 - **Sync Now** connects to Wi-Fi, pulls changes, uploads your edits, and shows the last sync time
@@ -39,6 +51,7 @@ Everything lives in `/.crosspoint/tasks/` on the SD card:
 | `open.tsv` | open tasks: the fields the list shows |
 | `archive.tsv` | completed and deleted tasks, in case another device reopens one |
 | `pending.jsonl` | edits not uploaded yet |
+| `context` | the selected context |
 
 Delete the folder to start over; the next sync fetches everything again. The device never uploads
 snapshots (it does not keep every property), so it ignores the server's snapshot requests; your
