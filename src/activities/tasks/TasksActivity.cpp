@@ -487,15 +487,16 @@ void TasksActivity::showTaskMenu(const int row) {
                            task->start ? tr(STR_TASKS_STOP) : tr(STR_TASKS_START),
                            waiting ? tr(STR_TASKS_UNWAIT) : tr(STR_TASKS_WAIT_DAY),
                            tr(STR_TASKS_WAIT_WEEK),
+                           tr(STR_TASKS_WAIT_MONTH),
                            tr(STR_DELETE),
                            tr(STR_CANCEL)};
-  popup.show(tr(STR_TASKS), task->description.c_str(), options, 6, 0,
+  popup.show(tr(STR_TASKS), task->description.c_str(), options, 7, 0,
              [this, uuid, waiting](const int option) { applyEdit(option, uuid, waiting); });
   requestUpdate();
 }
 
 void TasksActivity::applyEdit(const int option, const tw::Uuid& uuid, const bool waiting) {
-  if (!engine || option >= 5) {
+  if (!engine || option >= 6) {
     requestUpdate();
     return;
   }
@@ -524,6 +525,10 @@ void TasksActivity::applyEdit(const int option, const tw::Uuid& uuid, const bool
         ok = engine->waitUntil(uuid, now + 7 * DAY, now);
         break;
       case 4:
+        // Taskwarrior counts a month as 30 days.
+        ok = engine->waitUntil(uuid, now + 30 * DAY, now);
+        break;
+      case 5:
         ok = engine->remove(uuid, now);
         break;
       default:

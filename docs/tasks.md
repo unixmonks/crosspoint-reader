@@ -38,8 +38,8 @@ A filter with `or` or parentheses is marked as not supported and shows all tasks
   button on the first task to move focus to the tag strip, and again to the context strip; Left
   and Right then change the focused strip. Down, Select or Back return to the list. Switching
   context resets the tag to Any; the tag is not remembered.
-- Select a task for **Done**, **Start/Stop**, **Wait 1 Day**, **Wait 1 Week** (or **Stop Waiting**),
-  and **Delete**. Edits work offline and need the clock to be set, which happens on any sync.
+- Select a task for **Done**, **Start/Stop**, **Wait 1 Day** (or **Stop Waiting**), **Wait 1 Week**,
+  **Wait 1 Month** and **Delete**. Edits work offline and need the clock to be set, which happens on any sync.
 - Hold Select for the menu: **Sync Now** (with the last sync time and unsent edits), **Show
   Waiting** (tasks with a `wait` date in the future), and every context with its task count.
 - Tasks syncs when it opens and 5 seconds after an edit, over the Wi-Fi network you last joined,

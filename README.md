@@ -8,7 +8,7 @@
 **Tasks** shows your [Taskwarrior](https://taskwarrior.org) 3 tasks on the e-reader, synced with
 any TaskChampion sync server such as [taskwarriorsync.com](https://taskwarriorsync.com). It is
 mostly read-only, with the few edits you want away from a computer: mark done, start/stop, wait a
-day or a week, delete. Tasks are decrypted on the device; the server only ever sees ciphertext.
+day, a week or a month, delete. Tasks are decrypted on the device; the server only ever sees ciphertext.
 
 <p>
   <img src="docs/images/tasks/tasks-list.png" width="220" alt="Task list filtered by the work context">
