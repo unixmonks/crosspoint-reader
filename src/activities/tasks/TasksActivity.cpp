@@ -695,6 +695,9 @@ void TasksActivity::requestSync(const bool manual) {
   configured = taskwarrior::loadConfig(config);
   if (!configured) {
     if (manual) {
+      // The popup draws over the last frame; put the list back under it first
+      // (a manual sync comes from the menu, which replaces the list).
+      requestUpdateAndWait();
       const char* options[] = {tr(STR_OK_BUTTON)};
       popup.showMessage(tr(STR_TASKS_SETUP_TITLE), tr(STR_TASKS_SETUP_MESSAGE), options, 1, 0,
                         [this](int) { requestUpdate(); });
@@ -823,7 +826,9 @@ void TasksActivity::runSync() {
   requestUpdate();
 }
 
+// The popup draws over the last list frame; redrawing the list under it would
+// push a second, popup-less frame to the panel on every highlight move.
 void TasksActivity::render(RenderLock&& lock) {
+  if (popup.processRender(renderer, mappedInput)) return;
   UiListActivity::render(std::move(lock));
-  popup.processRender(renderer, mappedInput);
 }
